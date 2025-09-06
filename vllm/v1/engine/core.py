@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import zmq
+import nvtx
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
@@ -268,13 +269,22 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule()
-        model_output = self.execute_model_with_error_logging(
-            self.model_executor.execute_model,  # type: ignore
-            scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output)  # type: ignore
 
+        logger.info(f"running step_{self.scheduler.step_id}")
+        with nvtx.annotate(f"step_{self.scheduler.step_id}", color="green"):
+            with nvtx.annotate("schedule", color="orange"):
+                scheduler_output = self.scheduler.schedule()
+            
+            with nvtx.annotate("execute_model", color="red"):
+                model_output = self.execute_model_with_error_logging(
+                    self.model_executor.execute_model,  # type: ignore
+                    scheduler_output)
+            
+            with nvtx.annotate("update_from_output", color="blue"):
+                engine_core_outputs = self.scheduler.update_from_output(
+                    scheduler_output, model_output)  # type: ignore
+
+        self.scheduler.step_id = self.scheduler.step_id + 1
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
 

@@ -1917,6 +1917,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logger.info("Loading model from scratch...")
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.model_config)
+            logger.info("Loaded model type: %s", type(self.model).__name__)
             if self.lora_config:
                 self.model = self.load_lora_model(self.model,
                                                   self.model_config,

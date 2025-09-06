@@ -522,6 +522,18 @@ class FlashAttentionImpl(AttentionImpl):
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
+            # def tensor_summary(x):
+            #     if isinstance(x, torch.Tensor):
+            #         return f"{x.cpu().tolist()} (device={x.device}, dtype={x.dtype})"
+            #     return str(x)
+            
+            # logger.info(
+            #     ">>> flash_attn_varlen_func\n"
+            #     f"  max_query_len: {max_seqlen_q}\n"
+            #     f"  cu_seqlens_q: {tensor_summary(cu_seqlens_q)}\n"
+            #     f"  seqused_k: {tensor_summary(seqused_k)}\n"
+            # )
+
             flash_attn_varlen_func(
                 q=query[:num_actual_tokens],
                 k=key_cache,

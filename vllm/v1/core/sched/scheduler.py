@@ -34,6 +34,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.core.kv_cache_utils import hash_request_tokens
 
 logger = init_logger(__name__)
 
@@ -49,6 +50,7 @@ class Scheduler(SchedulerInterface):
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
+        self.step_id = 0
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
@@ -162,6 +164,167 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+    def _lcp_len(self, a: tuple[int, ...], b: tuple[int, ...]) -> int:
+        cnt = 0
+        for x,y in zip(a, b):
+            if x == y:
+                cnt += 1
+            else:
+                break
+        return cnt
+
+    def sort_waiting_requests(self):
+        # greedy = self.scheduler_config.greedy
+        greedy = True
+        hv_seq: dict[str, tuple[int, ...]] = {}
+        for req in self.waiting:
+            block_hashes = self.kv_cache_manager.req_to_block_hashes[req.request_id]
+            if not block_hashes:
+                block_hashes = hash_request_tokens(self.kv_cache_manager.caching_hash_fn,
+                                                   self.kv_cache_manager.block_size, req)
+                self.kv_cache_manager.req_to_block_hashes[req.request_id] = block_hashes
+            hv_seq[req.request_id] = tuple(b.hash_value for b in block_hashes)
+        # sorted_waiting_requests = sorted(self.waiting, key=lambda x: hv_seq[x.request_id])
+        sorted_waiting_requests = list(self.waiting)
+        if(not greedy or len(sorted_waiting_requests) <= 2):
+            # self.waiting = sorted_waiting_requests
+            self.waiting.clear()
+            self.waiting.extend(sorted_waiting_requests)
+            return
+        else:
+            remaining = sorted_waiting_requests[1:]
+            ordered = [sorted_waiting_requests[0]]
+            while remaining:
+                last_seq = ordered[-1]
+                best_idx = 0
+                best_score = -1
+                best_tie_key = None
+
+                for i, candidate in enumerate(remaining):
+                    score = self._lcp_len(hv_seq[last_seq.request_id], hv_seq[candidate.request_id])
+                    tie_key = candidate.request_id
+                    if score > best_score or (score == best_score and tie_key < best_tie_key):
+                        best_score = score
+                        best_tie_key = tie_key
+                        best_idx = i
+                ordered.append(remaining.pop(best_idx))
+            self.waiting.clear()
+            self.waiting.extend(ordered)
+            return
+
+    def sort_waiting_requests_cache_aware(self):
+        greedy = False
+        cache_hit_num: dict[str, int] = {}
+        for req in self.waiting:
+            computed_blocks, local_computed_tokens = self.kv_cache_manager.get_computed_blocks(req)
+            # cache_hit_num[req.request_id] = len(computed_blocks)
+            cache_hit_num[req.request_id] = local_computed_tokens
+        sorted_waiting_requests = sorted(
+            self.waiting,
+            key=lambda r: cache_hit_num[r.request_id],
+            reverse=True,
+        )
+        # self.waiting.clear()
+        # self.waiting.extend(sorted_waiting_requests)
+        # return
+        if(not greedy or len(sorted_waiting_requests) <= 2):
+            # self.waiting = sorted_waiting_requests
+            self.waiting.clear()
+            self.waiting.extend(sorted_waiting_requests)
+            return
+        else:
+            hv_seq: dict[str, tuple[int, ...]] = {}
+            for req in self.waiting:
+                block_hashes = self.kv_cache_manager.req_to_block_hashes[req.request_id]
+                if not block_hashes:
+                    block_hashes = hash_request_tokens(self.kv_cache_manager.caching_hash_fn,
+                                                    self.kv_cache_manager.block_size, req)
+                    self.kv_cache_manager.req_to_block_hashes[req.request_id] = block_hashes
+                hv_seq[req.request_id] = tuple(b.hash_value for b in block_hashes)
+            remaining = sorted_waiting_requests[1:]
+            ordered = [sorted_waiting_requests[0]]
+            while remaining:
+                last_seq = ordered[-1]
+                best_idx = 0
+                best_score = -1
+                best_tie_key = None
+
+                for i, candidate in enumerate(remaining):
+                    score = self._lcp_len(hv_seq[last_seq.request_id], hv_seq[candidate.request_id])
+                    tie_key = candidate.request_id
+                    if score > best_score or (score == best_score and tie_key < best_tie_key):
+                        best_score = score
+                        best_tie_key = tie_key
+                        best_idx = i
+                ordered.append(remaining.pop(best_idx))
+            self.waiting.clear()
+            self.waiting.extend(ordered)
+            return
+
+    def sort_waiting_requests_cache_aware_greedy(self):
+        greedy = True
+        hv_seq: dict[str, tuple[int, ...]] = {}
+        cache_hit_num: dict[str, int] = {}
+        for req in self.waiting:
+            block_hashes = self.kv_cache_manager.req_to_block_hashes[req.request_id]
+            if not block_hashes:
+                block_hashes = hash_request_tokens(self.kv_cache_manager.caching_hash_fn,
+                                                   self.kv_cache_manager.block_size, req)
+                self.kv_cache_manager.req_to_block_hashes[req.request_id] = block_hashes
+            hv_seq[req.request_id] = tuple(b.hash_value for b in block_hashes)
+            max_cache_hit_length = req.num_tokens - 1
+            computed_blocks, num_new_computed_tokens = self.kv_cache_manager.coordinator.find_longest_cache_hit(block_hashes, max_cache_hit_length)
+            cache_hit_num[req.request_id] = num_new_computed_tokens
+        
+        #debug
+        cache_hit_num_list = []
+        for req in self.waiting:
+            cache_hit_num_list.append(cache_hit_num[req.request_id])
+        if(len(cache_hit_num_list) > 0):
+            logger.info(f"\n--- cache_hit_num_list1: {cache_hit_num_list}")
+
+        sorted_waiting_requests = sorted(
+            self.waiting,
+            key=lambda r: (-cache_hit_num[r.request_id], r.num_tokens),
+        )
+        #debug
+        cache_hit_num_list = []
+        for req in sorted_waiting_requests:
+            cache_hit_num_list.append(cache_hit_num[req.request_id])
+        if(len(cache_hit_num_list) > 0):
+            logger.info(f"--- cache_hit_num_list2: {cache_hit_num_list}")
+
+        if len(sorted_waiting_requests) <= 2:
+            self.waiting.clear()
+            self.waiting.extend(sorted_waiting_requests)
+            return
+        remaining = sorted_waiting_requests[1:]
+        ordered = [sorted_waiting_requests[0]]
+        while remaining:
+            last_seq = ordered[-1]
+            best_idx = 0
+            best_score = -1
+            best_tie_key = None
+
+            for i, candidate in enumerate(remaining):
+                score = self._lcp_len(hv_seq[last_seq.request_id], hv_seq[candidate.request_id])
+                tie_key = candidate.request_id
+                if score > best_score or (score == best_score and tie_key < best_tie_key):
+                    best_score = score
+                    best_tie_key = tie_key
+                    best_idx = i
+
+            ordered.append(remaining.pop(best_idx))
+        self.waiting.clear()
+        self.waiting.extend(ordered)
+        #debug
+        cache_hit_num_list = []
+        for req in self.waiting:
+            cache_hit_num_list.append(cache_hit_num[req.request_id])
+        if(len(cache_hit_num_list) > 0):
+            logger.info(f"--- cache_hit_num_list3: {cache_hit_num_list}")
+        return
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -259,7 +422,21 @@ class Scheduler(SchedulerInterface):
                         )
                         self.running.remove(preempted_req)
                     else:
-                        preempted_req = self.running.pop()
+                        preempted_req = min(
+                            [r for r in self.running 
+                            if r != request and r not in scheduled_running_reqs],
+                            key=lambda r: (len(r._output_token_ids), -r.num_prompt_tokens),
+                            default=None
+                        )
+                        if preempted_req is not None:
+                            logger.info(f"len(_output_token_ids)={len(preempted_req._output_token_ids)}")
+                            logger.info(f"len(num_prompt_tokens)={preempted_req.num_prompt_tokens}")
+                            self.running.remove(preempted_req)
+                        else:
+                            logger.info("Preempted request not found - preemption failed")
+                            preempted_req = self.running.pop() # there is only one request in self.running, named request
+                    # else:
+                    #     preempted_req = self.running.pop()
 
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
@@ -330,6 +507,8 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
+            # self.sort_waiting_requests()
+            self.sort_waiting_requests_cache_aware_greedy()
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
@@ -491,6 +670,10 @@ class Scheduler(SchedulerInterface):
                 req_to_new_block_ids[request.request_id] = (
                     self.kv_cache_manager.get_block_ids(request.request_id))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
+                
+                if request.status == RequestStatus.PREEMPTED:
+                    logger.info(f"[Resume req] num_new_tokens={num_new_tokens}, num_external_computed_tokens={num_external_computed_tokens}")
+                
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens

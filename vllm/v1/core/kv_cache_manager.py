@@ -265,6 +265,11 @@ class KVCacheManager:
             new_computed_blocks=new_computed_block_list,
         )
 
+        # logger.info(
+        #     f"Allocating {num_blocks_to_allocate} blocks. "
+        #     f"Current free blocks: {self.block_pool.get_num_free_blocks()}"
+        # )
+
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
             # Cannot allocate new blocks
             return None

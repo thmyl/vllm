@@ -767,6 +767,17 @@ def main(args: argparse.Namespace):
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
             ),
+            "random_prefix_sharing": lambda: RandomDataset(dataset_path=args.dataset_path).sample_prefix_sharing(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                range_ratio=args.random_range_ratio,
+                input_len=args.random_input_len,
+                output_len=args.random_output_len,
+                prefix_glossary_size=args.prefix_glossary_size,
+                prefix_sharing_strength=args.prefix_sharing_strength,
+                min_prefix_tokens=args.min_prefix_tokens,
+                max_prefix_tokens=args.max_prefix_tokens,
+            ),
         }
 
         try:
@@ -938,7 +949,7 @@ def create_argument_parser():
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "custom"],
+        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "custom", "random_prefix_sharing"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
@@ -1189,6 +1200,30 @@ def create_argument_parser():
             "context length sampled from [input_len * (1 - range_ratio), "
             "input_len * (1 + range_ratio)]."
         ),
+    )
+    random_group.add_argument(
+        "--prefix-sharing-strength",
+        type=float,
+        default=0.5,
+        help="Prefix sharing strength, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--prefix-glossary-size",
+        type=int,
+        default=5,
+        help="Prefix glossary size, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--min-prefix-tokens",
+        type=int,
+        default=2,
+        help="Minimum number of prefix tokens, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--max-prefix-tokens",
+        type=int,
+        default=8,
+        help="Maximum number of prefix tokens, used only for random sampling.",
     )
 
     hf_group = parser.add_argument_group("hf dataset options")
