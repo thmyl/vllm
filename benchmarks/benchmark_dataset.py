@@ -419,25 +419,19 @@ class RandomDataset(BenchmarkDataset):
 
         requests = []
         for i in range(num_requests):
-            # 根据共享强度选择前缀生成方式
             if random.random() < prefix_sharing_strength:
-                # 高概率使用基础共享前缀（促进共享）
                 selected_prefix = random.choice(base_prefixes)
             else:
-                # 低概率生成全新的随机前缀（增加多样性）
                 prefix_len = random.randint(min_prefix_tokens, max_prefix_tokens)
                 selected_prefix = np.random.randint(0, vocab_size, size=prefix_len).tolist()
 
-            # 生成内部序列
             inner_seq = (
                 (offsets[i] + i + np.arange(input_lens[i])) % vocab_size
             ).tolist()
             
-            # 组合完整的token序列
             token_sequence = selected_prefix + inner_seq
             prompt = tokenizer.decode(token_sequence)
             
-            # 重新编码解码以确保长度一致性
             total_input_len = len(selected_prefix) + int(input_lens[i])
             re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
                 :total_input_len

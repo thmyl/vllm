@@ -261,6 +261,7 @@ class Scheduler(SchedulerInterface):
             self.waiting.extend(ordered)
             return
 
+    # TODO: optimize the sorting algorithm
     def sort_waiting_requests_cache_aware_greedy(self):
         greedy = True
         hv_seq: dict[str, tuple[int, ...]] = {}
@@ -421,22 +422,22 @@ class Scheduler(SchedulerInterface):
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                         self.running.remove(preempted_req)
-                    else:
-                        preempted_req = min(
-                            [r for r in self.running 
-                            if r != request and r not in scheduled_running_reqs],
-                            key=lambda r: (len(r._output_token_ids), -r.num_prompt_tokens),
-                            default=None
-                        )
-                        if preempted_req is not None:
-                            logger.info(f"len(_output_token_ids)={len(preempted_req._output_token_ids)}")
-                            logger.info(f"len(num_prompt_tokens)={preempted_req.num_prompt_tokens}")
-                            self.running.remove(preempted_req)
-                        else:
-                            logger.info("Preempted request not found - preemption failed")
-                            preempted_req = self.running.pop() # there is only one request in self.running, named request
                     # else:
-                    #     preempted_req = self.running.pop()
+                    #     preempted_req = min(
+                    #         [r for r in self.running 
+                    #         if r != request and r not in scheduled_running_reqs],
+                    #         key=lambda r: (len(r._output_token_ids), -r.num_prompt_tokens),
+                    #         default=None
+                    #     )
+                    #     if preempted_req is not None:
+                    #         logger.info(f"len(_output_token_ids)={len(preempted_req._output_token_ids)}")
+                    #         logger.info(f"len(num_prompt_tokens)={preempted_req.num_prompt_tokens}")
+                    #         self.running.remove(preempted_req)
+                    #     else:
+                    #         logger.info("Preempted request not found - preemption failed")
+                    #         preempted_req = self.running.pop() # there is only one request in self.running, named request
+                    else:
+                        preempted_req = self.running.pop()
 
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
